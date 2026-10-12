@@ -45,6 +45,13 @@ deploying:
 
 See `FarmPi/README.md` for FarmPi installation and weather configuration.
 
+## Photos and 3D models
+
+- Upload build and installation photos under `assets/photos/`.
+- Upload printable enclosure and mounting models under `hardware/stl/`.
+- Each component has its own folder and a short naming guide.
+- Remove GPS metadata from photos before publishing them.
+
 ## Design goals
 
 - Long-range, low-power operation
