@@ -1,0 +1,10 @@
+**/GatewaySecrets.h
+**/.env
+**/venv/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/static/cameras/
+**/build/
+**/.build/
+

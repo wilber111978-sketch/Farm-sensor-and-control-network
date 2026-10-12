@@ -1,0 +1,16 @@
+[Unit]
+Description=FarmPi Web Dashboard
+After=network.target mosquitto.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=farmpi
+WorkingDirectory=/opt/farm-dashboard
+ExecStart=/opt/farm-dashboard/venv/bin/python /opt/farm-dashboard/app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
