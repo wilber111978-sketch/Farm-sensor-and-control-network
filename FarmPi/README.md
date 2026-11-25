@@ -45,6 +45,9 @@ git clone --depth 1 -b camera-go2rtc https://github.com/wilber111978-sketch/farm
 sudo bash ~/farm-src/FarmPi/install-go2rtc.sh
 ```
 
+- The installer never replaces the deployed `app.py` (which can be newer than
+  Git). It merges only the camera changes via `tools/apply_camera_update.py`
+  and leaves the file untouched if they don't match exactly.
 - Re-run the script after changing camera settings in `.env`.
 - go2rtc is locked down to streaming only (`allow_paths: [/api/ws]`, no
   exec/ffmpeg modules). It listens on ports 1984 and 8555.
