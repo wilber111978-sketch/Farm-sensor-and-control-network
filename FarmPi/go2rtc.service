@@ -1,0 +1,15 @@
+[Unit]
+Description=go2rtc camera relay for FarmPi (no re-encoding)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=farmpi
+ExecStart=/usr/local/bin/go2rtc -config /opt/go2rtc/go2rtc.yaml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

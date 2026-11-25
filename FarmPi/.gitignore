@@ -8,3 +8,4 @@ static/cameras/
 *.backup-*
 *.bak
 
+static/go2rtc/

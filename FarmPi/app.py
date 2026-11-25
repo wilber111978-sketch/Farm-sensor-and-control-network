@@ -52,6 +52,12 @@ CAMERA_DIR = BASE_DIR / "static" / "cameras"
 SOLAR_CAMERA_LAST_FRAME = CAMERA_DIR / "solar_last.jpg"
 CAMERA_DIR.mkdir(parents=True, exist_ok=True)
 
+# go2rtc relays the camera's own H.265/H.264 video straight to the browser with no
+# re-encoding (installed by install-go2rtc.sh). When it is not running, the page
+# falls back to the slower ffmpeg MJPEG view below.
+GO2RTC_PORT = int(os.getenv("GO2RTC_PORT", "1984"))
+GO2RTC_PLAYER = BASE_DIR / "static" / "go2rtc" / "video-stream.js"
+
 
 # =============================================================================
 # HUNTER HYDRAWISE SETTINGS - EDIT THESE BEFORE UPLOADING TO THE FARMPI
@@ -857,6 +863,11 @@ CAMERA_HTML = r"""
     main { width: min(1180px, 100%); margin: 0 auto; padding: 14px; }
     .viewer { position: relative; background: #000; border: 1px solid #303733; border-radius: 12px; overflow: hidden; min-height: 280px; display: grid; place-items: center; }
     #feed { display: block; width: 100%; max-height: calc(100vh - 260px); object-fit: contain; background: #000; }
+    #rtc { display: block; width: 100%; }
+    #rtc video { display: block; width: 100%; max-height: calc(100vh - 260px); object-fit: contain; background: #000; }
+    .viewer:fullscreen #feed, .viewer:fullscreen #rtc video { max-height: 100vh; height: 100vh; }
+    [hidden] { display: none !important; }
+    .ptz button.active { border-color: #55dd78; background: #20472c; }
     .overlay { position: absolute; top: 10px; left: 10px; padding: 5px 8px; border-radius: 7px; background: rgba(0,0,0,.62); font-size: 11px; font-weight: 700; }
     .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
     button, .button { border: 1px solid #4a5750; border-radius: 8px; padding: 9px 12px; color: #fff; background: #27302b; font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; }
@@ -877,7 +888,7 @@ CAMERA_HTML = r"""
       main { padding: 8px; }
       .controls { grid-template-columns: 1fr; }
       .viewer { min-height: 220px; border-radius: 8px; }
-      #feed { max-height: 56vh; }
+      #feed, #rtc video { max-height: 56vh; }
       .topbar { padding: 8px; }
       .title strong { font-size: 15px; }
       .title span { font-size: 11px; }
@@ -892,12 +903,14 @@ CAMERA_HTML = r"""
   </header>
   <main>
     <section id="viewer" class="viewer">
-      <img id="feed" alt="Solar / Orchard Camera live feed">
-      <div id="profileLabel" class="overlay">SUBSTREAM · LIVE</div>
+      <video-stream id="rtc" hidden></video-stream>
+      <img id="feed" alt="Solar / Orchard Camera live feed" hidden>
+      <div id="profileLabel" class="overlay">CONNECTING…</div>
     </section>
     <div class="toolbar">
       <button id="subBtn" class="active">Live Substream</button>
       <button id="mainBtn">HQ (4K source)</button>
+      <button id="basicBtn" title="Old ffmpeg/MJPEG view - slow on this Pi, for troubleshooting only">Basic view</button>
       <button id="snapshotBtn">Save Thumbnail</button>
       <button id="fullscreenBtn">Fullscreen</button>
     </div>
@@ -910,7 +923,7 @@ CAMERA_HTML = r"""
           <span></span><button data-move="down" aria-label="Tilt down">▼</button><span></span>
         </div>
         <div class="zoom"><button data-move="zoom_in">Zoom +</button><button data-move="zoom_out">Zoom −</button></div>
-        <div class="hint">Hold a direction or zoom button to move. Releasing sends STOP immediately.</div>
+        <div class="hint">Hold a direction or zoom button to move; release to stop. A quick tap gives a small nudge.</div>
       </section>
       <section class="panel">
         <h3>Presets</h3>
@@ -919,58 +932,114 @@ CAMERA_HTML = r"""
       </section>
     </div>
   </main>
-<script>
-  let profile = 'sub';
+<script type="module">
+  const GO2RTC_PORT = {{ go2rtc_port }};
   const feed = document.getElementById('feed');
+  const rtc = document.getElementById('rtc');
+  const label = document.getElementById('profileLabel');
   const errorBox = document.getElementById('error');
+  let profile = 'sub';
+  let mode = null;            // 'direct' (go2rtc) or 'basic' (ffmpeg MJPEG)
+  let playerLoaded = false;
+
   function showError(message) { errorBox.textContent = message; errorBox.style.display = message ? 'block' : 'none'; }
-  function setProfile(next) {
-    profile = next;
-    document.getElementById('subBtn').classList.toggle('active', next === 'sub');
-    document.getElementById('mainBtn').classList.toggle('active', next === 'main');
-    document.getElementById('profileLabel').textContent = next === 'sub' ? 'SUBSTREAM · LIVE' : '4K SOURCE · LIVE';
-    feed.src = `/api/camera/solar/live?profile=${next}&t=${Date.now()}`;
+
+  async function loadPlayer() {
+    if (playerLoaded) return true;
+    try { await import('/static/go2rtc/video-stream.js'); playerLoaded = true; return true; }
+    catch (e) { console.error('go2rtc player failed to load', e); return false; }
   }
+
+  function stopBasic() { feed.removeAttribute('src'); feed.hidden = true; }
+  function disconnectDirect() { try { rtc.ondisconnect?.(); } catch (_) {} }
+  function stopDirect() { disconnectDirect(); try { rtc.src = ''; } catch (_) {} rtc.hidden = true; }
+
+  function render() {
+    document.getElementById('subBtn').classList.toggle('active', mode === 'direct' && profile === 'sub');
+    document.getElementById('mainBtn').classList.toggle('active', mode === 'direct' && profile === 'main');
+    document.getElementById('basicBtn').classList.toggle('active', mode === 'basic');
+    if (mode === 'direct') {
+      stopBasic();
+      rtc.hidden = false;
+      rtc.mode = 'webrtc,mse';          // no Pi-side transcoding modes
+      rtc.media = 'video';               // camera audio is G.711, skip it
+      disconnectDirect();                // player only connects once per src change otherwise
+      rtc.src = `ws://${location.hostname}:${GO2RTC_PORT}/api/ws?src=solar_${profile}`;
+      label.textContent = profile === 'sub' ? 'SUBSTREAM · LIVE · DIRECT' : '4K · LIVE · DIRECT';
+    } else {
+      stopDirect();
+      feed.hidden = false;
+      feed.src = `/api/camera/solar/live?t=${Date.now()}`;
+      label.textContent = 'SUBSTREAM · BASIC (SLOW)';
+    }
+  }
+
+  async function chooseMode(preferBasic = false) {
+    let go2rtc = false;
+    try { const r = await fetch('/api/camera/solar/status', {cache:'no-store'}); go2rtc = (await r.json()).go2rtc; } catch (_) {}
+    if (!preferBasic && go2rtc && await loadPlayer()) { mode = 'direct'; showError(''); }
+    else {
+      mode = 'basic';
+      if (!preferBasic) showError('Fast direct view is not available (go2rtc not running) - using the slow basic view. Run install-go2rtc.sh on FarmPi.');
+    }
+    render();
+  }
+
   async function status() {
     try {
       const r = await fetch('/api/camera/solar/status', {cache:'no-store'}); const d = await r.json();
       const el = document.getElementById('status'); el.className = `status ${d.online ? 'online' : 'offline'}`;
       document.getElementById('statusText').textContent = d.online ? 'ONLINE' : 'OFFLINE';
-      if (!d.ffmpeg) showError('ffmpeg is not installed on FarmPi. Run the included install-camera-support.sh script.');
-      else if (!d.configured) showError('Solar camera password is not configured in /opt/farm-dashboard/.env.');
+      if (!d.configured) showError('Solar camera password is not configured in /opt/farm-dashboard/.env.');
+      else if (mode === 'basic' && !d.ffmpeg) showError('ffmpeg is not installed on FarmPi.');
     } catch (_) { document.getElementById('statusText').textContent = 'ERROR'; }
   }
+
+  // ---------- PTZ: move while held, stop on release ----------
   async function ptz(action, extra={}) {
     try {
       const r = await fetch('/api/camera/solar/ptz', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action, ...extra})});
-      const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); showError(''); return d;
+      const d = await r.json(); if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`); return d;
     } catch (e) { showError(`PTZ: ${e.message}`); }
   }
+  // Commands go out strictly in order, so a STOP can never overtake its MOVE.
+  let ptzQueue = Promise.resolve();
+  const queuePtz = (action, extra) => (ptzQueue = ptzQueue.then(() => ptz(action, extra)));
+
+  const MIN_NUDGE_MS = 250;      // a quick tap still moves a little
+  const MAX_HOLD_MS = 20000;     // safety stop if a release is ever missed
+  let held = null, heldAt = 0, safetyTimer = null;
+
+  function startMove(btn, e) {
+    e.preventDefault();
+    if (held) return;
+    held = btn; heldAt = performance.now();
+    btn.classList.add('active');
+    try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+    queuePtz(btn.dataset.move);
+    safetyTimer = setTimeout(stopMove, MAX_HOLD_MS);
+  }
+  function stopMove() {
+    if (!held) return;
+    const btn = held; held = null;
+    clearTimeout(safetyTimer);
+    btn.classList.remove('active');
+    const wait = Math.max(0, MIN_NUDGE_MS - (performance.now() - heldAt));
+    setTimeout(() => queuePtz('stop'), wait);
+  }
   document.querySelectorAll('[data-move]').forEach(btn => {
-    btn.style.touchAction = 'manipulation';
-    btn.style.userSelect = 'none';
-    btn.style.webkitUserSelect = 'none';
-    btn.style.webkitTouchCallout = 'none';
-
+    Object.assign(btn.style, {touchAction: 'none', userSelect: 'none', webkitUserSelect: 'none', webkitTouchCallout: 'none'});
     btn.addEventListener('contextmenu', e => e.preventDefault());
-
-    btn.addEventListener('pointerdown', async e => {
-      e.preventDefault();
-
-      if (btn.dataset.busy === '1') return;
-      btn.dataset.busy = '1';
-
-      await ptz(btn.dataset.move);
-
-      setTimeout(async () => {
-        await ptz('stop');
-        btn.dataset.busy = '0';
-      }, 450);
-    });
+    btn.addEventListener('pointerdown', e => startMove(btn, e));
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => btn.addEventListener(ev, stopMove));
   });
-  document.getElementById('homeBtn').onclick = () => ptz('home');
-  document.getElementById('subBtn').onclick = () => setProfile('sub');
-  document.getElementById('mainBtn').onclick = () => setProfile('main');
+  window.addEventListener('blur', stopMove);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopMove(); });
+
+  document.getElementById('homeBtn').onclick = () => queuePtz('home');
+  document.getElementById('subBtn').onclick = () => { profile = 'sub'; if (mode !== 'direct') chooseMode(); else render(); };
+  document.getElementById('mainBtn').onclick = () => { profile = 'main'; if (mode !== 'direct') chooseMode(); else render(); };
+  document.getElementById('basicBtn').onclick = () => chooseMode(true);
   document.getElementById('fullscreenBtn').onclick = () => document.getElementById('viewer').requestFullscreen?.();
   document.getElementById('snapshotBtn').onclick = async () => { const r = await fetch('/api/camera/solar/snapshot', {method:'POST'}); const d = await r.json(); if (!r.ok) showError(d.error || 'Snapshot failed'); };
   async function loadPresets() {
@@ -978,15 +1047,13 @@ CAMERA_HTML = r"""
     try {
       const r = await fetch('/api/camera/solar/presets', {cache:'no-store'}); const d = await r.json();
       box.innerHTML = '';
-      if (d.presets?.length) d.presets.forEach(p => { const b=document.createElement('button'); b.textContent=p.name || `Preset ${p.token}`; b.onclick=()=>ptz('preset',{token:p.token}); box.appendChild(b); });
+      if (d.presets?.length) d.presets.forEach(p => { const b=document.createElement('button'); b.textContent=p.name || `Preset ${p.token}`; b.onclick=()=>queuePtz('preset',{token:p.token}); box.appendChild(b); });
       else box.innerHTML = '<span class="hint">No saved presets reported by the camera.</span>';
     } catch (e) { box.innerHTML = '<span class="hint">Preset list unavailable.</span>'; }
   }
-  function saveLastFrame() { navigator.sendBeacon('/api/camera/solar/snapshot'); }
-  window.addEventListener('pagehide', saveLastFrame);
-  feed.onerror = () => showError('Live video could not start. Check camera credentials and ffmpeg on FarmPi.');
-  feed.onload = () => showError('');
-  setProfile('sub'); status(); loadPresets(); setInterval(status, 15000);
+  window.addEventListener('pagehide', () => navigator.sendBeacon('/api/camera/solar/snapshot'));
+  feed.onerror = () => { if (mode === 'basic') showError('Basic video could not start. Check camera credentials and ffmpeg on FarmPi.'); };
+  chooseMode(); status(); loadPresets(); setInterval(status, 15000);
 </script>
 </body>
 </html>
@@ -1014,6 +1081,17 @@ def solar_rtsp_uri(profile="sub"):
         f"rtsp://{SOLAR_CAMERA_HOST}:{SOLAR_CAMERA_RTSP_PORT}/{stream}"
         f"?username={quote(SOLAR_CAMERA_USER, safe='')}&password={quote(token, safe='')}"
     )
+
+
+def go2rtc_running(timeout=0.4):
+    """True when the local go2rtc relay is listening and its browser player is installed."""
+    if not GO2RTC_PLAYER.exists():
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", GO2RTC_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def camera_online(timeout=0.8):
@@ -1062,7 +1140,7 @@ def capture_solar_thumbnail(profile="sub"):
 
 @app.route("/camera/solar")
 def solar_camera_page():
-    return render_template_string(CAMERA_HTML)
+    return render_template_string(CAMERA_HTML, go2rtc_port=GO2RTC_PORT)
 
 
 @app.route("/api/camera/solar/status")
@@ -1071,6 +1149,7 @@ def solar_camera_status():
     return jsonify({
         "online": camera_online(),
         "ffmpeg": bool(shutil.which("ffmpeg")),
+        "go2rtc": go2rtc_running(),
         "configured": bool(SOLAR_CAMERA_PASSWORD),
         "has_thumbnail": has_thumb,
         "thumbnail_mtime": int(SOLAR_CAMERA_LAST_FRAME.stat().st_mtime) if has_thumb else None,
@@ -1097,23 +1176,23 @@ def solar_camera_snapshot():
 
 @app.route("/api/camera/solar/live")
 def solar_camera_live():
-    profile = "main" if request.args.get("profile") == "main" else "sub"
-    uri = solar_rtsp_uri(profile)
+    # Basic/fallback view only. This Pi has to decode the camera's H.265 in software
+    # here, so it is pinned to the substream at low resolution; the 4K stream is only
+    # offered through go2rtc, which passes video through without decoding it.
+    uri = solar_rtsp_uri("sub")
     if not uri:
         return jsonify({"error": "Solar camera password is not configured in .env"}), 503
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return jsonify({"error": "ffmpeg is not installed on FarmPi"}), 503
 
-    if profile == "main":
-        video_filter = "fps=4,scale=1600:-2"
-        quality = "5"
-    else:
-        video_filter = "fps=10,scale=960:-2"
-        quality = "6"
     command = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp",
-        "-i", uri, "-an", "-vf", video_filter, "-q:v", quality,
+        ffmpeg, "-hide_banner", "-loglevel", "error",
+        # Low-latency input + cheaper decoding (skips the deblocking filter).
+        "-fflags", "nobuffer", "-flags", "low_delay",
+        "-skip_loop_filter", "all", "-flags2", "fast",
+        "-rtsp_transport", "tcp",
+        "-i", uri, "-an", "-vf", "fps=8,scale=640:-2", "-q:v", "7",
         "-f", "mpjpeg", "-boundary_tag", "ffmpeg", "pipe:1"
     ]
 

@@ -29,3 +29,27 @@ This folder is the source-controlled copy of the software deployed at
 The real `.env`, camera snapshots, virtual environments, Python caches, and
 deployment backups are intentionally excluded from Git.
 
+
+## Camera live view (go2rtc)
+
+The Solar camera streams H.265. Re-encoding that to MJPEG on a Raspberry Pi 3
+cannot keep up (measured 0.91x on the substream, 0.15x on 4K), which caused
+growing delay, freezes and corrupted frames.
+
+`install-go2rtc.sh` installs [go2rtc](https://github.com/AlexxIT/go2rtc), which
+relays the camera's own video to the browser without decoding it (WebRTC, or
+MSE for H.265). The tablet decodes the video in hardware, like the camera app.
+
+```bash
+git clone --depth 1 -b camera-go2rtc https://github.com/wilber111978-sketch/farm-sensor-and-control-network ~/farm-src
+sudo bash ~/farm-src/FarmPi/install-go2rtc.sh
+```
+
+- Re-run the script after changing camera settings in `.env`.
+- go2rtc is locked down to streaming only (`allow_paths: [/api/ws]`, no
+  exec/ffmpeg modules). It listens on ports 1984 and 8555.
+- If go2rtc is not running, the page falls back to the old ffmpeg view
+  (substream only, low frame rate). The "Basic view" button forces it.
+- H.264 on the camera's substream gives the widest browser support and the
+  lowest delay (WebRTC). With H.265, Chrome on Android plays it over MSE.
+- PTZ buttons move while held and stop on release.
